@@ -43,7 +43,7 @@ func TestRuntimeSignatureAndRetry(t *testing.T) {
 		if len(nonces) == 1 {
 			fmt.Fprint(w, `{"decision":"ALLOW","authorization_id":"aat_1","authorization_proof":"proof","replayed":false}`)
 		} else {
-			fmt.Fprint(w, `{"authorization_id":"aat_1","status":"CLAIMED","execution_id":"pex_1","replayed":true}`)
+			fmt.Fprint(w, `{"authorization_id":"aat_1","status":"CLAIMED","execution_id":"ape_1","replayed":true}`)
 		}
 	}))
 	defer server.Close()
@@ -79,12 +79,12 @@ func TestAgentPayCurrentContextEnvelopeAndExecution(t *testing.T) {
 				t.Error("missing signed execution credentials")
 			}
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprint(w, `{"payment_execution_id":"pex_test","authorization_id":"aat_test","status":"CLAIMED","claim_receipt":"receipt"}`)
-		case "/v1/auth-payment-executions/pex_test":
+			fmt.Fprint(w, `{"payment_execution_id":"ape_test","authorization_id":"aat_test","status":"CLAIMED","claim_receipt":"receipt"}`)
+		case "/v1/auth-payment-executions/ape_test":
 			if r.Header.Get("X-AgentAuth-Claim-Receipt") != "receipt" || r.Header.Get("Idempotency-Key") != "" {
 				t.Error("query headers wrong")
 			}
-			fmt.Fprint(w, `{"payment_execution_id":"pex_test","authorization_id":"aat_test","status":"CLAIMED"}`)
+			fmt.Fprint(w, `{"payment_execution_id":"ape_test","authorization_id":"aat_test","status":"CLAIMED"}`)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 			w.WriteHeader(404)
@@ -106,6 +106,9 @@ func TestAgentPayCurrentContextEnvelopeAndExecution(t *testing.T) {
 	status, err := client.GetPaymentExecution(context.Background(), exec.PaymentExecutionID, exec.ClaimReceipt)
 	if err != nil || status.Status != "CLAIMED" {
 		t.Fatalf("Query: %+v %v", status, err)
+	}
+	if _, err := client.GetPaymentExecution(context.Background(), "pex_test", exec.ClaimReceipt); err == nil {
+		t.Fatal("accepted legacy pex_ payment execution ID")
 	}
 }
 

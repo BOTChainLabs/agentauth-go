@@ -251,7 +251,8 @@ func (c *RuntimeClient) GetPaymentExecution(ctx context.Context, executionID, or
 	if c == nil || c.agentPayURL == "" {
 		return out, errors.New("agentauth: AgentPay URL required")
 	}
-	if !validID(executionID, "pex_") || originalReceipt == "" {
+	// AgentPay issues payment_execution_id as ape_<uuid>; pex_ was never used on the wire.
+	if !validID(executionID, "ape_") || originalReceipt == "" {
 		return out, errors.New("agentauth: execution ID and original Receipt required")
 	}
 	err := c.call(ctx, c.agentPayURL, "agentpay", http.MethodGet, "auth-payment-executions/"+executionID, "", nil, originalReceipt, &out, http.StatusOK)

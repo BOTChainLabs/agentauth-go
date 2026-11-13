@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.1
+
+- `GetPaymentExecution` accepts AgentPay `ape_` payment execution IDs. The previous `pex_` client check rejected live IDs and blocked settlement status queries.
+
 ## v0.1.0
 
 Initial public release of the AgentAuth Go SDK.

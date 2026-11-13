@@ -2,7 +2,7 @@
 
 AgentAuth client for trusted integration backends and Agent Runtimes. This module is independent of the private `agent-auth-service` Go module. The backend and Runtime use separate client types and credentials.
 
-Install the published release with `go get github.com/BOTChainLabs/agentauth-go@v0.1.0`.
+Install the published release with `go get github.com/BOTChainLabs/agentauth-go@v0.1.1`.
 
 ## Register and recover an association
 
