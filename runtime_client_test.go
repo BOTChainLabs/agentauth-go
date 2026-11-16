@@ -8,7 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -120,6 +122,20 @@ func TestSignedJSONAndCredentialIsolation(t *testing.T) {
 	if _, err := canonicalJSON([]byte(`{} garbage`)); err == nil {
 		t.Fatal("accepted trailing JSON")
 	}
+	for _, raw := range []string{
+		`{"amount":"1","amount":"2"}`,
+		`{"a":{"b":1,"b":2}}`,
+		`{"memo":"\ud800"}`,
+		"{\"memo\":\"\xff\"}",
+	} {
+		if _, err := canonicalJSON([]byte(raw)); err == nil {
+			t.Fatalf("accepted invalid signed JSON: %q", raw)
+		}
+	}
+	negZero, err := canonicalJSON([]byte(`{"n":-0}`))
+	if err != nil || string(negZero) != `{"n":0}` {
+		t.Fatalf("negative zero: %s %v", negZero, err)
+	}
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{3}, ed25519.SeedSize))
 	public, err := RuntimePublicCredential(key)
 	if err != nil || public.Algorithm != "Ed25519" || public.PublicKey == "" {
@@ -142,6 +158,12 @@ func TestSignedJSONAndCredentialIsolation(t *testing.T) {
 	}
 	if req.Header.Get("X-Request-Expires-At") == "" {
 		t.Fatal("missing expiry")
+	}
+	for _, body := range []string{`{"amount":"1","amount":"2"}`, `{"memo":"\ud800"}`} {
+		badReq, _ := http.NewRequest(http.MethodPost, "https://auth.example/v1/authorizations:authorize", strings.NewReader(body))
+		if err := signer.Sign(badReq, "auth", "op"); err == nil {
+			t.Fatalf("Sign accepted invalid body %q", body)
+		}
 	}
 }
 
@@ -177,5 +199,104 @@ func TestAuthorizeTransientRetryKeepsBusinessKey(t *testing.T) {
 	}
 	if len(keys) != 2 || keys[0] != keys[1] || nonces[0] == nonces[1] {
 		t.Fatalf("retry keys/nonces: %v %v", keys, nonces)
+	}
+}
+
+func TestAuthorizeRetriesUnexpectedEOFButNotInvalidJSON(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{5}, ed25519.SeedSize))
+	signer, _ := NewRuntimeSigner("ses_test", key)
+
+	var truncatedHits int
+	truncated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		truncatedHits++
+		keys := r.Header.Get("Idempotency-Key")
+		nonce := r.Header.Get("X-Request-Nonce")
+		if keys != "business-1" || nonce == "" {
+			t.Errorf("missing idempotency/nonce")
+		}
+		if truncatedHits == 1 {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("hijack unsupported")
+			}
+			conn, bufrw, err := hj.Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = bufrw.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 120\r\nContent-Type: application/json\r\n\r\n{\"decision\":\"ALLOW\"")
+			_ = bufrw.Flush()
+			_ = conn.Close()
+			return
+		}
+		fmt.Fprint(w, `{"decision":"ALLOW","authorization_id":"aat_test","authorization_proof":"proof"}`)
+	}))
+	defer truncated.Close()
+	client, err := NewRuntimeClient(RuntimeConfig{AuthURL: truncated.URL, Signer: signer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := client.AuthorizePayment(context.Background(), "original-context", "business-1")
+	if err != nil || !out.IsAllowed() || truncatedHits != 2 {
+		t.Fatalf("unexpected EOF retry: hits=%d out=%+v err=%v", truncatedHits, out, err)
+	}
+
+	var invalidHits int
+	invalid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		invalidHits++
+		fmt.Fprint(w, `{"decision":`)
+	}))
+	defer invalid.Close()
+	client, err = NewRuntimeClient(RuntimeConfig{AuthURL: invalid.URL, Signer: signer, RetryAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.AuthorizePayment(context.Background(), "original-context", "business-2")
+	if err == nil || invalidHits != 1 {
+		t.Fatalf("invalid JSON should not retry: hits=%d err=%v", invalidHits, err)
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatal("complete invalid JSON should not surface as UnexpectedEOF")
+	}
+}
+
+func TestPreparePaymentExecutionRetriesUnexpectedEOF(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{6}, ed25519.SeedSize))
+	signer, _ := NewRuntimeSigner("ses_test", key)
+	var hits int
+	var nonces []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		nonces = append(nonces, r.Header.Get("X-Request-Nonce"))
+		if r.Header.Get("Idempotency-Key") != "business-1" {
+			t.Errorf("business key changed")
+		}
+		if hits == 1 {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("hijack unsupported")
+			}
+			conn, bufrw, err := hj.Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = bufrw.WriteString("HTTP/1.1 201 Created\r\nContent-Length: 200\r\nContent-Type: application/json\r\n\r\n{\"payment_execution_id\":\"ape_test\"")
+			_ = bufrw.Flush()
+			_ = conn.Close()
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"payment_execution_id":"ape_test","authorization_id":"aat_test","status":"CLAIMED","claim_receipt":"receipt"}`)
+	}))
+	defer server.Close()
+	client, err := NewRuntimeClient(RuntimeConfig{AuthURL: server.URL, AgentPayURL: server.URL, Signer: signer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec, err := client.PreparePaymentExecution(context.Background(), "proof", "ctx", "business-1")
+	if err != nil || exec.ClaimReceipt != "receipt" || hits != 2 {
+		t.Fatalf("Prepare UnexpectedEOF retry: hits=%d exec=%+v err=%v", hits, exec, err)
+	}
+	if len(nonces) != 2 || nonces[0] == nonces[1] {
+		t.Fatalf("Prepare retry nonces: %v", nonces)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // RuntimeSigner holds only the Runtime credential. Keep its private key in the
@@ -181,17 +182,20 @@ func encodeRFC3986(s string) string {
 	return b.String()
 }
 
-// canonicalJSON covers the I-JSON subset used by V1 payment requests. Values
-// with fractional/exponent numbers are rejected to prevent silent hash drift.
+// canonicalJSON covers the I-JSON / JCS subset used by V1 payment requests.
+// Duplicate object members, illegal UTF-8 / unpaired surrogates, and
+// fractional/exponent numbers are rejected; -0 is normalized to 0.
 func canonicalJSON(raw []byte) ([]byte, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
+	if err := validateJSONText(raw); err != nil {
 		return nil, err
 	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	v, err := decodeStrictJSON(dec)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("agentauth: trailing or invalid JSON value")
 	}
 	var b bytes.Buffer
@@ -199,6 +203,154 @@ func canonicalJSON(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	return b.Bytes(), nil
+}
+
+// validateJSONText rejects illegal UTF-8 and unpaired UTF-16 escapes before
+// encoding/json can replace them with U+FFFD.
+func validateJSONText(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return errors.New("agentauth: invalid UTF-8 in signed JSON")
+	}
+	for i := 0; i < len(raw); {
+		if raw[i] != '"' {
+			i++
+			continue
+		}
+		i++
+		for i < len(raw) {
+			c := raw[i]
+			if c == '"' {
+				i++
+				break
+			}
+			if c == '\\' {
+				if i+1 >= len(raw) {
+					return errors.New("agentauth: invalid JSON string escape")
+				}
+				if raw[i+1] != 'u' {
+					i += 2
+					continue
+				}
+				r, next, err := parseJSONUnicodeEscape(raw, i)
+				if err != nil {
+					return err
+				}
+				if isUTF16HighSurrogate(r) {
+					if next+1 >= len(raw) || raw[next] != '\\' || raw[next+1] != 'u' {
+						return errors.New("agentauth: unpaired Unicode surrogate in JSON")
+					}
+					r2, next2, err := parseJSONUnicodeEscape(raw, next)
+					if err != nil {
+						return err
+					}
+					if !isUTF16LowSurrogate(r2) {
+						return errors.New("agentauth: unpaired Unicode surrogate in JSON")
+					}
+					i = next2
+					continue
+				}
+				if isUTF16LowSurrogate(r) {
+					return errors.New("agentauth: unpaired Unicode surrogate in JSON")
+				}
+				i = next
+				continue
+			}
+			if c < 0x20 {
+				return errors.New("agentauth: invalid control character in JSON string")
+			}
+			i++
+		}
+	}
+	return nil
+}
+
+func parseJSONUnicodeEscape(raw []byte, i int) (rune, int, error) {
+	if i+5 >= len(raw) || raw[i] != '\\' || raw[i+1] != 'u' {
+		return 0, 0, errors.New("agentauth: invalid JSON Unicode escape")
+	}
+	var r rune
+	for _, c := range raw[i+2 : i+6] {
+		r <<= 4
+		switch {
+		case c >= '0' && c <= '9':
+			r |= rune(c - '0')
+		case c >= 'a' && c <= 'f':
+			r |= rune(c - 'a' + 10)
+		case c >= 'A' && c <= 'F':
+			r |= rune(c - 'A' + 10)
+		default:
+			return 0, 0, errors.New("agentauth: invalid JSON Unicode escape")
+		}
+	}
+	return r, i + 6, nil
+}
+
+func isUTF16HighSurrogate(r rune) bool { return r >= 0xD800 && r <= 0xDBFF }
+func isUTF16LowSurrogate(r rune) bool  { return r >= 0xDC00 && r <= 0xDFFF }
+
+func decodeStrictJSON(dec *json.Decoder) (any, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	switch t := tok.(type) {
+	case json.Delim:
+		switch t {
+		case '{':
+			obj := make(map[string]any)
+			seen := make(map[string]struct{})
+			for dec.More() {
+				keyTok, err := dec.Token()
+				if err != nil {
+					return nil, err
+				}
+				key, ok := keyTok.(string)
+				if !ok {
+					return nil, errors.New("agentauth: invalid JSON object member name")
+				}
+				if _, exists := seen[key]; exists {
+					return nil, errors.New("agentauth: duplicate JSON object member")
+				}
+				seen[key] = struct{}{}
+				val, err := decodeStrictJSON(dec)
+				if err != nil {
+					return nil, err
+				}
+				obj[key] = val
+			}
+			closeTok, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			if closeTok != json.Delim('}') {
+				return nil, errors.New("agentauth: invalid JSON object")
+			}
+			return obj, nil
+		case '[':
+			arr := make([]any, 0)
+			for dec.More() {
+				val, err := decodeStrictJSON(dec)
+				if err != nil {
+					return nil, err
+				}
+				arr = append(arr, val)
+			}
+			closeTok, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			if closeTok != json.Delim(']') {
+				return nil, errors.New("agentauth: invalid JSON array")
+			}
+			return arr, nil
+		default:
+			return nil, errors.New("agentauth: invalid JSON value")
+		}
+	case bool, json.Number, string, nil:
+		return t, nil
+	default:
+		return nil, fmt.Errorf("agentauth: unsupported JSON value %T", tok)
+	}
 }
 
 func writeCanonical(b *bytes.Buffer, v any) error {
@@ -220,6 +372,9 @@ func writeCanonical(b *bytes.Buffer, v any) error {
 		}
 		if _, err := strconv.ParseInt(s, 10, 64); err != nil {
 			return errors.New("agentauth: signed JSON integer out of range")
+		}
+		if s == "-0" {
+			s = "0"
 		}
 		b.WriteString(s)
 	case []any:

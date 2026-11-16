@@ -356,7 +356,13 @@ func retryableRuntimeError(err error) bool {
 		return apiErr.Retryable && apiErr.StatusCode >= 500
 	}
 	var transportErr *url.Error
-	return errors.As(err, &transportErr)
+	if errors.As(err, &transportErr) {
+		return true
+	}
+	// Partial response bodies (connection drop mid-transfer) are safe to retry
+	// with the same business key/body and a fresh signed envelope. Complete but
+	// invalid JSON responses are not retryable.
+	return errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func readLimited(r io.Reader, max int64) ([]byte, error) {
