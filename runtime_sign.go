@@ -182,9 +182,13 @@ func encodeRFC3986(s string) string {
 	return b.String()
 }
 
+// jsSafeIntegerMax is Number.MAX_SAFE_INTEGER (2^53 - 1). Signed payment JSON
+// only allows this range so Go and JavaScript JCS digests stay aligned.
+const jsSafeIntegerMax = 1<<53 - 1
+
 // canonicalJSON covers the I-JSON / JCS subset used by V1 payment requests.
 // Duplicate object members, illegal UTF-8 / unpaired surrogates, and
-// fractional/exponent numbers are rejected; -0 is normalized to 0.
+// fractional/exponent/non-safe-integer numbers are rejected; -0 is normalized to 0.
 func canonicalJSON(raw []byte) ([]byte, error) {
 	if err := validateJSONText(raw); err != nil {
 		return nil, err
@@ -370,7 +374,8 @@ func writeCanonical(b *bytes.Buffer, v any) error {
 		if strings.ContainsAny(s, ".eE") {
 			return errors.New("agentauth: fractional/exponent JSON numbers are unsupported in signed payment requests")
 		}
-		if _, err := strconv.ParseInt(s, 10, 64); err != nil {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n < -jsSafeIntegerMax || n > jsSafeIntegerMax {
 			return errors.New("agentauth: signed JSON integer out of range")
 		}
 		if s == "-0" {

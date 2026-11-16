@@ -136,6 +136,25 @@ func TestSignedJSONAndCredentialIsolation(t *testing.T) {
 	if err != nil || string(negZero) != `{"n":0}` {
 		t.Fatalf("negative zero: %s %v", negZero, err)
 	}
+	for _, raw := range []string{
+		`{"n":9007199254740991}`,
+		`{"n":-9007199254740991}`,
+		`{"amount":"9007199254740993"}`,
+	} {
+		if _, err := canonicalJSON([]byte(raw)); err != nil {
+			t.Fatalf("rejected safe/decimal value %q: %v", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		`{"n":9007199254740992}`,
+		`{"n":9007199254740993}`,
+		`{"n":-9007199254740993}`,
+		`{"n":9223372036854775807}`,
+	} {
+		if _, err := canonicalJSON([]byte(raw)); err == nil {
+			t.Fatalf("accepted non-safe integer JSON: %q", raw)
+		}
+	}
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{3}, ed25519.SeedSize))
 	public, err := RuntimePublicCredential(key)
 	if err != nil || public.Algorithm != "Ed25519" || public.PublicKey == "" {
@@ -159,7 +178,12 @@ func TestSignedJSONAndCredentialIsolation(t *testing.T) {
 	if req.Header.Get("X-Request-Expires-At") == "" {
 		t.Fatal("missing expiry")
 	}
-	for _, body := range []string{`{"amount":"1","amount":"2"}`, `{"memo":"\ud800"}`} {
+	for _, body := range []string{
+		`{"amount":"1","amount":"2"}`,
+		`{"memo":"\ud800"}`,
+		`{"n":9007199254740993}`,
+		`{"n":-9007199254740993}`,
+	} {
 		badReq, _ := http.NewRequest(http.MethodPost, "https://auth.example/v1/authorizations:authorize", strings.NewReader(body))
 		if err := signer.Sign(badReq, "auth", "op"); err == nil {
 			t.Fatalf("Sign accepted invalid body %q", body)
