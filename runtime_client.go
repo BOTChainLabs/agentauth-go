@@ -86,8 +86,10 @@ type AuthorizeResult struct {
 	Replayed           bool      `json:"replayed"`
 }
 
-func (r AuthorizeResult) IsAllowed() bool { return r.Decision == "ALLOW" && r.AuthorizationProof != "" }
-func (r AuthorizeResult) IsDenied() bool  { return r.Decision == "DENY" }
+func (r AuthorizeResult) IsAllowed() bool {
+	return r.Decision == "ALLOW" && r.AuthorizationProof != "" && r.AuthorizationID != "" && r.SessionID != ""
+}
+func (r AuthorizeResult) IsDenied() bool { return r.Decision == "DENY" }
 func (r AuthorizeResult) IsStatusReplay() bool {
 	return r.Decision == "" && r.Replayed && r.AuthorizationID != "" && r.Status != ""
 }
@@ -110,8 +112,17 @@ func (c *RuntimeClient) AuthorizePayment(ctx context.Context, paymentContextToke
 	if err != nil {
 		return out, err
 	}
+	// ALLOW must carry a durable authorization_id and the Session that signed
+	// the request; otherwise callers cannot associate or recover the grant.
+	// Return a zero result on failure so IsAllowed() is false even if the
+	// caller ignores the error.
+	if out.Decision == "ALLOW" && out.AuthorizationProof != "" {
+		if !validID(out.AuthorizationID, "aat_") || out.SessionID != c.signer.sessionID {
+			return AuthorizeResult{}, errors.New("agentauth: invalid Authorize ALLOW response")
+		}
+	}
 	if !out.IsAllowed() && !out.IsDenied() && !out.IsStatusReplay() {
-		return out, errors.New("agentauth: unknown Authorize response shape")
+		return AuthorizeResult{}, errors.New("agentauth: unknown Authorize response shape")
 	}
 	return out, nil
 }

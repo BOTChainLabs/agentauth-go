@@ -43,7 +43,7 @@ func TestRuntimeSignatureAndRetry(t *testing.T) {
 		}
 		nonces = append(nonces, r.Header.Get("X-Request-Nonce"))
 		if len(nonces) == 1 {
-			fmt.Fprint(w, `{"decision":"ALLOW","authorization_id":"aat_1","authorization_proof":"proof","replayed":false}`)
+			fmt.Fprint(w, `{"decision":"ALLOW","authorization_id":"aat_1","session_id":"ses_test","authorization_proof":"proof","replayed":false}`)
 		} else {
 			fmt.Fprint(w, `{"authorization_id":"aat_1","status":"CLAIMED","execution_id":"ape_1","replayed":true}`)
 		}
@@ -174,6 +174,41 @@ func TestCanonicalRuntimeQueryMatchesServerVector(t *testing.T) {
 	}
 }
 
+func TestAuthorizeALLOWRequiresIDAndMatchingSession(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, ed25519.SeedSize))
+	signer, err := NewRuntimeSigner("ses_test", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing authorization_id", `{"decision":"ALLOW","session_id":"ses_test","authorization_proof":"proof"}`},
+		{"session mismatch", `{"decision":"ALLOW","authorization_id":"aat_test","session_id":"ses_other","authorization_proof":"proof"}`},
+		{"missing session_id", `{"decision":"ALLOW","authorization_id":"aat_test","authorization_proof":"proof"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+			client, err := NewRuntimeClient(RuntimeConfig{AuthURL: server.URL, Signer: signer, RetryAttempts: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := client.AuthorizePayment(context.Background(), "context", "business-1")
+			if err == nil || !strings.Contains(err.Error(), "invalid Authorize ALLOW response") {
+				t.Fatalf("expected invalid ALLOW error, got out=%+v err=%v", out, err)
+			}
+			if out.IsAllowed() {
+				t.Fatalf("invalid ALLOW must return zero result: %+v", out)
+			}
+		})
+	}
+}
+
 func TestAuthorizeTransientRetryKeepsBusinessKey(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{4}, ed25519.SeedSize))
 	signer, _ := NewRuntimeSigner("ses_test", key)
@@ -186,7 +221,7 @@ func TestAuthorizeTransientRetryKeepsBusinessKey(t *testing.T) {
 			fmt.Fprint(w, `{"error_code":"DEPENDENCY_UNAVAILABLE","retryable":true}`)
 			return
 		}
-		fmt.Fprint(w, `{"decision":"ALLOW","authorization_id":"aat_test","authorization_proof":"proof"}`)
+		fmt.Fprint(w, `{"decision":"ALLOW","authorization_id":"aat_test","session_id":"ses_test","authorization_proof":"proof"}`)
 	}))
 	defer server.Close()
 	client, err := NewRuntimeClient(RuntimeConfig{AuthURL: server.URL, Signer: signer})
@@ -228,7 +263,7 @@ func TestAuthorizeRetriesUnexpectedEOFButNotInvalidJSON(t *testing.T) {
 			_ = conn.Close()
 			return
 		}
-		fmt.Fprint(w, `{"decision":"ALLOW","authorization_id":"aat_test","authorization_proof":"proof"}`)
+		fmt.Fprint(w, `{"decision":"ALLOW","authorization_id":"aat_test","session_id":"ses_test","authorization_proof":"proof"}`)
 	}))
 	defer truncated.Close()
 	client, err := NewRuntimeClient(RuntimeConfig{AuthURL: truncated.URL, Signer: signer})
