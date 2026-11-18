@@ -359,3 +359,40 @@ func TestPreparePaymentExecutionRetriesUnexpectedEOF(t *testing.T) {
 		t.Fatalf("Prepare retry nonces: %v", nonces)
 	}
 }
+
+func TestCreatePaymentContextPassesAgentPayDetails(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, ed25519.SeedSize))
+	signer, _ := NewRuntimeSigner("ses_test", key)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth-payment-contexts" {
+			t.Fatalf("path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		fmt.Fprint(w, `{"error":{"code":"PAYMENT_NOT_READY","message":"付款条件尚未满足","retryable":false,"details":{"checks":[{"name":"permit2_allowance","status":"BLOCKED","reason":"PERMIT2_ALLOWANCE_REQUIRED"}]},"recovery_actions":["APPROVE_PERMIT2"]},"request_id":"req_test"}`)
+	}))
+	defer server.Close()
+	client, err := NewRuntimeClient(RuntimeConfig{AuthURL: server.URL, AgentPayURL: server.URL, Signer: signer, RetryAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.CreatePaymentContext(context.Background(), PaymentContextRequest{
+		ResourceBindingID: "arb_test", ServiceID: "svc", ConfigVersion: 1,
+		PaymentRequired: json.RawMessage(`{}`),
+		RequestBinding:  RequestBinding{Method: "GET", ResourceURL: "https://example.com", RequestHash: strings.Repeat("a", 64), RequestHashVersion: "agentpay-request-v1"},
+	})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "PAYMENT_NOT_READY" || apiErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("APIError: %+v err=%v", apiErr, err)
+	}
+	checks, ok := apiErr.Details["checks"].([]any)
+	if !ok || len(checks) != 1 {
+		t.Fatalf("details.checks: %#v", apiErr.Details)
+	}
+	check, _ := checks[0].(map[string]any)
+	if check["name"] != "permit2_allowance" || check["reason"] != "PERMIT2_ALLOWANCE_REQUIRED" {
+		t.Fatalf("check: %#v", check)
+	}
+	if len(apiErr.RecoveryActions) != 1 || apiErr.RecoveryActions[0] != "APPROVE_PERMIT2" {
+		t.Fatalf("recovery: %#v", apiErr.RecoveryActions)
+	}
+}

@@ -98,14 +98,17 @@ type AgentAssociation struct {
 	Replayed        bool      `json:"replayed"`
 }
 
-// APIError exposes the AgentAuth error contract without requiring a private
-// service package. Use errors.As to inspect StatusCode, Code, and Retryable.
+// APIError exposes the AgentAuth / AgentPay error contract without requiring a
+// private service package. Use errors.As to inspect StatusCode, Code, Retryable,
+// and Details (AgentPay envelopes may include checks under details).
 type APIError struct {
-	StatusCode int    `json:"-"`
-	Code       string `json:"error_code"`
-	Message    string `json:"error_message"`
-	RequestID  string `json:"request_id"`
-	Retryable  bool   `json:"retryable"`
+	StatusCode      int            `json:"-"`
+	Code            string         `json:"error_code"`
+	Message         string         `json:"error_message"`
+	RequestID       string         `json:"request_id"`
+	Retryable       bool           `json:"retryable"`
+	Details         map[string]any `json:"details,omitempty"`
+	RecoveryActions []string       `json:"recovery_actions,omitempty"`
 }
 
 func (e *APIError) Error() string {

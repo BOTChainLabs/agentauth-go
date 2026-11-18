@@ -321,16 +321,27 @@ func (c *RuntimeClient) call(ctx context.Context, baseURL, audience, method, pat
 		}
 	}
 	if audience == "" {
+		// AgentPay public/runtime errors use {error:{code,message,details,...},request_id}.
 		var wrapped struct {
 			Error struct {
-				Code      string `json:"code"`
-				Message   string `json:"message"`
-				Retryable bool   `json:"retryable"`
+				Code            string         `json:"code"`
+				Message         string         `json:"message"`
+				Retryable       bool           `json:"retryable"`
+				Details         map[string]any `json:"details"`
+				RecoveryActions []string       `json:"recovery_actions"`
 			} `json:"error"`
 			RequestID string `json:"request_id"`
 		}
 		if json.Unmarshal(raw, &wrapped) == nil && wrapped.Error.Code != "" {
-			return &APIError{StatusCode: resp.StatusCode, Code: wrapped.Error.Code, Message: wrapped.Error.Message, Retryable: wrapped.Error.Retryable, RequestID: wrapped.RequestID}
+			return &APIError{
+				StatusCode:      resp.StatusCode,
+				Code:            wrapped.Error.Code,
+				Message:         wrapped.Error.Message,
+				Retryable:       wrapped.Error.Retryable,
+				RequestID:       wrapped.RequestID,
+				Details:         wrapped.Error.Details,
+				RecoveryActions: wrapped.Error.RecoveryActions,
+			}
 		}
 	}
 	apiErr := &APIError{StatusCode: resp.StatusCode}
